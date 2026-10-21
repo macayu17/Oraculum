@@ -18,20 +18,20 @@ Practice questions are study prompts based on the supplied material. They are no
 
 - React and Vite frontend
 - FastAPI backend
-- NVIDIA Nemotron 3.5 Super VL through the NVIDIA API
-- PyMuPDF for PDF text extraction and page rendering
+- Gemini 3.8 Flash, with Gemini 3.6 Flash as an overload fallback
+- Google Gen AI Python SDK and PyMuPDF for native PDF input and validation
 
 ## Run locally
 
 Requirements: Python 3.13 or later and Node.js.
 
-Create a project-root `.env` file from the example and add your NVIDIA API key:
+Create a project-root `.env` file from the example, then add your Gemini API key:
 
 ```powershell
 Copy-Item .env.example .env
 ```
 
-Set `NVIDIA_API_KEY` in `.env`. The key is read by the backend and must not be committed or added to frontend environment variables.
+The backend reads `GEMINI_API_KEY` from `.env`. Keep the key out of source control and frontend environment variables.
 
 In one PowerShell terminal, install and start the backend:
 
@@ -67,11 +67,11 @@ Then open [http://127.0.0.1:8000](http://127.0.0.1:8000).
 
 - Each file can be up to 20 MB. PDFs can contain up to 40 pages.
 - Each analysis accepts up to 12 exam papers and 8 reference files.
-- Scanned pages and images are sent to NVIDIA for transcription and analysis. Text-based PDFs are extracted locally before analysis.
+- Question papers are sent to Gemini as PDF or image input for question extraction and analysis. Reference material may be converted to text first.
 - Uploaded text and study sessions are held in backend memory. They are cleared when the backend restarts. The application does not use accounts or persistent document storage.
-- A failed NVIDIA request is retried once. If it still fails, the application displays an error so the analysis can be retried.
+- Temporary Gemini capacity errors fall back from Gemini 3.8 Flash to Gemini 3.6 Flash. Other request failures are shown so the analysis can be retried.
 
-Only upload material you are permitted to share with NVIDIA's hosted API.
+Only upload material you are permitted to share with Google's hosted Gemini API. Free-tier prompts and responses may be used to improve Google's products; review the current API terms before uploading sensitive material.
 
 ## Deploy
 
@@ -81,7 +81,7 @@ The frontend is hosted on Vercel and the API is hosted on Render. The project is
 
 The root-level `render.yaml` configures a Python web service. Set these environment variables in Render:
 
-- `NVIDIA_API_KEY`: your NVIDIA API key.
+- `GEMINI_API_KEY`: your Gemini API key from Google AI Studio.
 - `FRONTEND_ORIGINS`: the exact Vercel website origin, such as `https://your-project.vercel.app`.
 
 For additional domains, list their origins separated by commas. The deployed backend is available at [https://oraculum-api-og1a.onrender.com](https://oraculum-api-og1a.onrender.com).
@@ -107,7 +107,7 @@ cd frontend
 npm run build
 ```
 
-The unit tests use stubbed model responses. Testing real analysis requires a valid NVIDIA API key and an uploaded document.
+The unit tests use stubbed model responses. Testing real analysis requires a valid Gemini API key and an uploaded document.
 
 ## Deployment notes
 

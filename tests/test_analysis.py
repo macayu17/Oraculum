@@ -14,19 +14,49 @@ import app
 
 
 class ModelRequestTests(unittest.TestCase):
-    def test_reasoning_mode_is_sent_to_nvidia(self):
-        create = Mock(return_value=SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="A reply"), finish_reason="stop")]))
-        client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    def test_reasoning_mode_and_json_schema_are_sent_to_gemini(self):
+        generate = Mock(return_value=SimpleNamespace(candidates=[], text="A reply"))
+        client = SimpleNamespace(models=SimpleNamespace(generate_content=generate))
+        with patch.object(app, "get_client", return_value=client):
+            self.assertEqual(app.answer([], reasoning_effort="low", response_format={"json_schema": {"schema": {"type": "object"}}}), "A reply")
+        self.assertEqual(generate.call_args.kwargs["model"], "gemini-3.8-flash")
+        self.assertEqual(generate.call_args.kwargs["config"].thinking_config.thinking_level, "LOW")
+        self.assertEqual(generate.call_args.kwargs["config"].response_json_schema, {"type": "object"})
+
+    def test_native_pdf_input_is_passed_to_gemini(self):
+        contents, system = app.gemini_parts([
+            {"role": "system", "content": "Stay grounded in the paper."},
+            {"role": "user", "content": [{"type": "text", "text": "Read this."}, {"type": "file_data", "file_data": {"data": b"%PDF", "mime_type": "application/pdf"}}]},
+        ])
+        self.assertEqual(system, "Stay grounded in the paper.")
+        self.assertEqual(contents[0].parts[1].inline_data.mime_type, "application/pdf")
+        self.assertEqual(contents[0].parts[1].inline_data.data, b"%PDF")
+
+    def test_falls_back_when_gemini_primary_is_overloaded(self):
+        class Overloaded(Exception):
+            code = 503
+
+        generate = Mock(side_effect=[Overloaded(), SimpleNamespace(candidates=[], text="A reply")])
+        client = SimpleNamespace(models=SimpleNamespace(generate_content=generate))
         with patch.object(app, "get_client", return_value=client):
             self.assertEqual(app.answer([], reasoning_effort="low"), "A reply")
-        self.assertEqual(create.call_args.kwargs["model"], "z-ai/glm-5.3-flash")
-        self.assertEqual(create.call_args.kwargs["reasoning_effort"], "low")
-        self.assertEqual(create.call_args.kwargs["extra_body"], {"chat_template_kwargs": {"clear_thinking": True}})
+        self.assertEqual([call.kwargs["model"] for call in generate.call_args_list], ["gemini-3.8-flash", "gemini-3.6-flash"])
+
+    def test_reports_a_retryable_error_when_both_models_are_overloaded(self):
+        class Overloaded(Exception):
+            code = 503
+
+        client = SimpleNamespace(models=SimpleNamespace(generate_content=Mock(side_effect=Overloaded())))
+        with patch.object(app, "get_client", return_value=client):
+            with self.assertRaises(app.HTTPException) as error:
+                app.answer([])
+        self.assertEqual(error.exception.status_code, 503)
+        self.assertIn("temporarily overloaded", error.exception.detail)
 
 
     def test_truncated_completion_is_not_returned_as_a_report(self):
-        create = Mock(return_value=SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="partial"), finish_reason="length")]))
-        client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+        generate = Mock(return_value=SimpleNamespace(candidates=[SimpleNamespace(finish_reason=app.types.FinishReason.MAX_TOKENS)], text="partial"))
+        client = SimpleNamespace(models=SimpleNamespace(generate_content=generate))
         with patch.object(app, "get_client", return_value=client):
             with self.assertRaises(app.HTTPException) as error:
                 app.answer([])
@@ -106,12 +136,17 @@ class UploadResponsivenessTests(unittest.IsolatedAsyncioTestCase):
         safety_timer = threading.Timer(2, release.set)
         safety_timer.start()
 
+        responses = iter([
+            {"questions": [{"paper": "test.pdf", "concept": "Algebra", "question": "Solve x=1", "marks": 1, "page": 1, "type": "Solve", "repeat": "new"}]},
+            {"summary": "Test", "classifications": [{"index": 0, "repeat": "new"}], "patterns": [], "practice": []},
+        ])
+
         def slow_answer(*args, **kwargs):
             self.assertEqual(kwargs["reasoning_effort"], "low")
             self.assertEqual(kwargs["response_format"]["type"], "json_schema")
             started.set()
             release.wait()
-            return json.dumps({"summary": "Test", "questions": [{"paper": "test.pdf", "concept": "Algebra", "question": "Solve x=1", "marks": 1, "page": 1, "type": "Solve", "repeat": "new"}], "patterns": [], "practice": []})
+            return json.dumps(next(responses))
 
         document = pymupdf.open()
         document.new_page().insert_text((72, 72), "Solve x=1")
@@ -131,6 +166,7 @@ class UploadResponsivenessTests(unittest.IsolatedAsyncioTestCase):
                     self.assertFalse(release.is_set(), "Health waited for the model instead of responding during analysis")
                     status = await client.get(f"/api/analyze/{job_id}")
                     self.assertEqual(status.json()["status"], "processing")
+                    self.assertEqual(status.json()["progress"], "Sending test.pdf (1 pages) to Gemini for analysis")
                     release.set()
                     for _ in range(100):
                         status = await client.get(f"/api/analyze/{job_id}")
@@ -139,6 +175,8 @@ class UploadResponsivenessTests(unittest.IsolatedAsyncioTestCase):
                         await asyncio.sleep(0.01)
                     self.assertEqual(status.json()["status"], "complete")
                     self.assertEqual(status.json()["result"]["paper_count"], 1)
+                    self.assertEqual(status.json()["result"]["questions"][0]["question"], "Solve x=1")
+                    self.assertEqual(status.json()["result"]["questions"][0]["repeat"], "new")
         finally:
             release.set()
             safety_timer.cancel()

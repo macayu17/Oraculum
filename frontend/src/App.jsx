@@ -45,6 +45,7 @@ export default function App() {
   const [tab, setTab] = useState('revise')
   const [busy, setBusy] = useState(false)
   const [elapsed, setElapsed] = useState(0)
+  const [analysisProgress, setAnalysisProgress] = useState('')
   const [dragging, setDragging] = useState(false)
   const [error, setError] = useState('')
   const [threadId, setThreadId] = useState('')
@@ -83,6 +84,7 @@ export default function App() {
     setError('')
     if (!papers.length) return setError('Add at least one past paper to begin.')
     setBusy(true)
+    setAnalysisProgress('Preparing files')
     setReport(null)
     setMessages([])
     try {
@@ -101,7 +103,10 @@ export default function App() {
         if (!statusResponse.ok) throw new Error(status.detail || 'Analysis status could not be retrieved.')
         if (status.status === 'failed') throw new Error(status.detail || 'Analysis could not be completed.')
         if (status.status === 'complete') result = status.result
-        else result = status
+        else {
+          result = status
+          setAnalysisProgress(status.progress || 'Analyzing papers')
+        }
       }
       setReport(result)
       setThreadId(result.thread_id)
@@ -133,7 +138,7 @@ export default function App() {
     <a className="skip-link" href="#main">Skip to workspace</a>
     <header className="topbar" id="top">
       <a className="wordmark" href="#top" aria-label="Oraculum home"><span className="wordmark-icon"><Icon name="mark" size={19}/></span><span>ORACULUM<span className="wordmark-dot">.</span></span></a>
-      <div className="topbar-right"><span className="topbar-section">PAPER ANALYSIS <span>/</span> WORKSPACE</span><span className="model-state"><i className={`status-dot ${apiReady === false ? 'status-needed' : ''}`}/>{apiReady === false ? 'MODEL UNAVAILABLE' : apiReady === null ? 'CHECKING MODEL' : 'GLM 5.3 · FLASH'}</span></div>
+      <div className="topbar-right"><span className="topbar-section">PAPER ANALYSIS <span>/</span> WORKSPACE</span><span className="model-state"><i className={`status-dot ${apiReady === false ? 'status-needed' : ''}`}/>{apiReady === false ? 'MODEL UNAVAILABLE' : apiReady === null ? 'CHECKING MODEL' : 'GEMINI 3.8 · FLASH'}</span></div>
     </header>
 
     <main className="workspace" id="main">
@@ -151,7 +156,7 @@ export default function App() {
           </div>
           <FileList files={papers} kind="papers" onRemove={removeFile}/>
           <div className="archive-footer"><span>QUESTIONS, MARKS, STRUCTURE</span><span>UP TO 12 PAPERS</span></div>
-          {busy && <p className="analysis-status" role="status">Analyzing {papers.length} paper{papers.length === 1 ? '' : 's'} · {Math.floor(elapsed / 60)}:{String(elapsed % 60).padStart(2, '0')} elapsed. Reading scans and comparing questions can take a few minutes.</p>}
+          {busy && <p className="analysis-status" role="status">{analysisProgress} · {Math.floor(elapsed / 60)}:{String(elapsed % 60).padStart(2, '0')} elapsed. Scanned papers can take several minutes to read.</p>}
           {error && !report && <p className="error-message" role="alert">{error}</p>}
           <div className="submit-row"><p><span className="privacy-dot"/>{papers.length ? `${papers.length} paper${papers.length === 1 ? "" : "s"} ready to compare.` : "Choose files, then compare."}</p><button className="primary-button" type="submit" disabled={busy}>{busy ? <><span className="spinner"/> Reading papers…</> : <>Compare papers <Icon name="arrow" size={17}/></>}</button></div>
         </form>

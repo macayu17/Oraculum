@@ -14,7 +14,7 @@ services:
         - .python-version
         - render.yaml
     envVars:
-      - key: NVIDIA_API_KEY
+      - key: GEMINI_API_KEY
         sync: false
       - key: FRONTEND_ORIGINS
         sync: false

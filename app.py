@@ -8,6 +8,7 @@ import tempfile
 import time
 import uuid
 from collections import defaultdict
+from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
@@ -18,14 +19,15 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 from dotenv import load_dotenv
-from openai import NOT_GIVEN, OpenAI
+from google import genai
+from google.genai import types
 from pydantic import BaseModel, ValidationError
 
 
 ROOT = Path(__file__).parent
 load_dotenv(ROOT / ".env")
-MODEL = "z-ai/glm-5.3-flash"
-BASE_URL = "https://integrate.api.nvidia.com/v1"
+MODEL = "gemini-3.8-flash"
+FALLBACK_MODEL = "gemini-3.6-flash"
 MAX_FILE_BYTES = 20 * 1024 * 1024
 MAX_PAGES = 40
 SCAN_BATCH_SIZE = 3
@@ -69,42 +71,99 @@ class AnalysisReport(BaseModel):
     practice: list[str]
 
 
-def get_client() -> OpenAI:
-    key = os.getenv("NVIDIA_API_KEY")
+class PaperExtraction(BaseModel):
+    model_config = {"extra": "forbid"}
+    questions: list[PaperQuestion]
+
+
+class QuestionClassification(BaseModel):
+    model_config = {"extra": "forbid"}
+    index: int
+    repeat: Literal["exact", "reworded", "topic", "new"]
+
+
+class ComparisonReport(BaseModel):
+    model_config = {"extra": "forbid"}
+    summary: str
+    classifications: list[QuestionClassification]
+    patterns: list[str]
+    practice: list[str]
+
+
+@lru_cache(maxsize=1)
+def get_client() -> genai.Client:
+    key = os.getenv("GEMINI_API_KEY")
     if not key:
         raise HTTPException(
             status_code=503,
-            detail="NVIDIA_API_KEY is not set. Add your NVIDIA API key to the environment and restart Oraculum.",
+            detail="GEMINI_API_KEY is not set. Add your Gemini API key to the backend environment and restart Oraculum.",
         )
-    return OpenAI(api_key=key, base_url=BASE_URL, timeout=180, max_retries=1)
+    return genai.Client(api_key=key)
+
+
+def gemini_parts(messages: list[dict]) -> tuple[list, str | None]:
+    contents, system = [], []
+    for message in messages:
+        role = message["role"]
+        content = message.get("content", "")
+        if role == "system":
+            system.append(content if isinstance(content, str) else " ".join(item.get("text", "") for item in content if item.get("type") == "text"))
+            continue
+        parts = []
+        for item in content if isinstance(content, list) else [{"type": "text", "text": content}]:
+            if item.get("type") == "text":
+                parts.append(types.Part.from_text(text=item["text"]))
+            elif item.get("type") == "image_url":
+                url = item["image_url"]["url"]
+                header, data = url.split(",", 1)
+                parts.append(types.Part.from_bytes(data=base64.b64decode(data), mime_type=header.split(";")[0][5:]))
+            elif item.get("type") == "file_data":
+                file = item["file_data"]
+                parts.append(types.Part.from_bytes(data=file["data"], mime_type=file["mime_type"]))
+        contents.append(types.Content(role="model" if role == "assistant" else "user", parts=parts))
+    return contents, "\n\n".join(part for part in system if part) or None
 
 
 def answer(messages: list[dict], *, max_tokens: int = 6000, reasoning_effort: str = "low", response_format: dict | None = None) -> str:
     try:
-        result = get_client().chat.completions.create(
-            model=MODEL,
-            messages=messages,
+        contents, system_instruction = gemini_parts(messages)
+        schema = response_format.get("json_schema", {}).get("schema") if response_format else None
+        client = get_client()
+        config = types.GenerateContentConfig(
+            system_instruction=system_instruction,
             temperature=0.6,
             top_p=0.95,
-            max_tokens=max_tokens,
-            stream=False,
-            reasoning_effort=reasoning_effort,
-            extra_body={"chat_template_kwargs": {"clear_thinking": True}},
-            response_format=response_format or NOT_GIVEN,
+            max_output_tokens=max_tokens,
+            thinking_config=types.ThinkingConfig(thinking_level=reasoning_effort.upper()),
+            response_mime_type="application/json" if schema else None,
+            response_json_schema=schema,
         )
-        if result.choices[0].finish_reason == "length":
+        for model in (MODEL, FALLBACK_MODEL):
+            try:
+                result = client.models.generate_content(model=model, contents=contents, config=config)
+                break
+            except Exception as exc:
+                if model == MODEL and getattr(exc, "code", None) in {429, 500, 502, 503, 504}:
+                    logger.warning("Gemini model %s unavailable (%s); retrying with %s", model, exc.code, FALLBACK_MODEL)
+                    continue
+                raise
+        if result.candidates and result.candidates[0].finish_reason == types.FinishReason.MAX_TOKENS:
             raise HTTPException(status_code=502, detail="The model reached its response limit before finishing. Compare fewer papers in one analysis.")
-        content = result.choices[0].message.content
+        content = result.text
         if not content or not content.strip():
-            raise HTTPException(status_code=502, detail="NVIDIA returned an empty answer. Please retry.")
+            raise HTTPException(status_code=502, detail="Gemini returned an empty answer. Please retry.")
         return content
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"NVIDIA request failed: {exc}") from exc
+        if getattr(exc, "code", None) == 429 or getattr(exc, "code", 0) >= 500:
+            raise HTTPException(status_code=503, detail="Gemini is temporarily overloaded on both available models. Please retry in a minute.") from exc
+        if "timed out" in str(exc).casefold() or "timeout" in str(exc).casefold():
+            raise HTTPException(status_code=504, detail="Gemini took too long to answer. Try fewer papers or split long papers into smaller files.") from exc
+        raise HTTPException(status_code=502, detail=f"Gemini request failed: {exc}") from exc
 
 
-async def read_document(upload: UploadFile) -> str:
+async def read_document(upload: UploadFile, progress=None) -> str:
     filename = upload.filename or "upload"
     suffix = Path(filename).suffix.lower()
     image_types = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg"}
@@ -147,6 +206,8 @@ async def read_document(upload: UploadFile) -> str:
         for (index, source, _), text in zip(batch, texts):
             pages[index] = f"{source}\n{text}"
             logger.info("Transcribed %s", source)
+            if progress:
+                progress(f"Reading {filename}: page {index + 1} of {len(pdf)}")
 
     try:
         for index, page in enumerate(pdf):
@@ -163,6 +224,8 @@ async def read_document(upload: UploadFile) -> str:
                     scan_batch = []
             else:
                 pages[index] = f"{source}\n{text}"
+                if progress:
+                    progress(f"Reading {filename}: page {number} of {len(pdf)}")
         if scan_batch:
             await transcribe_batch(scan_batch)
     finally:
@@ -172,6 +235,49 @@ async def read_document(upload: UploadFile) -> str:
     if not content:
         raise HTTPException(status_code=400, detail=f"No readable text found in {filename}.")
     return content
+
+
+async def extract_paper(upload: UploadFile, progress=None) -> list[PaperQuestion]:
+    filename = upload.filename or "upload"
+    suffix = Path(filename).suffix.lower()
+    mime_type = {".pdf": "application/pdf", ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg"}.get(suffix)
+    if not mime_type:
+        raise HTTPException(status_code=400, detail="Upload PDF, PNG, or JPEG files only.")
+    raw = await upload.read(MAX_FILE_BYTES + 1)
+    if len(raw) > MAX_FILE_BYTES:
+        raise HTTPException(status_code=413, detail=f"{filename} exceeds the 20 MB limit.")
+    if suffix == ".pdf":
+        try:
+            pdf = fitz.open(stream=raw, filetype="pdf")
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"Could not read {filename} as a PDF.") from exc
+        try:
+            if pdf.is_encrypted:
+                raise HTTPException(status_code=400, detail=f"{filename} is password-protected.")
+            if len(pdf) > MAX_PAGES:
+                raise HTTPException(status_code=413, detail=f"{filename} has more than {MAX_PAGES} pages.")
+            page_count = len(pdf)
+        finally:
+            pdf.close()
+        if progress:
+            progress(f"Sending {filename} ({page_count} pages) to Gemini for analysis")
+    prompt = f"""Read this exam paper and extract every readable question and subquestion. Keep alternatives distinct and preserve exact wording, numbering, marks, and page numbers. Set paper to the filename {filename!r}. Set repeat to new for now; recurrence is compared across papers afterward. Do not invent unreadable content. Return only the structured questions."""
+    raw_response = await run_in_threadpool(
+        answer,
+        [{"role": "user", "content": [
+            {"type": "text", "text": prompt},
+            {"type": "file_data", "file_data": {"data": raw, "mime_type": mime_type}},
+        ]}],
+        max_tokens=12000, reasoning_effort="low",
+        response_format={"type": "json_schema", "json_schema": {"name": "paper_extraction", "strict": True, "schema": PaperExtraction.model_json_schema()}},
+    )
+    try:
+        questions = PaperExtraction.model_validate(parse_json(raw_response)).questions
+    except ValidationError as exc:
+        raise HTTPException(status_code=502, detail=f"Gemini could not extract questions from {filename}. Please retry with a clearer paper.") from exc
+    if progress:
+        progress(f"Extracted {len(questions)} questions from {filename}")
+    return questions
 
 
 def parse_json(raw: str) -> dict:
@@ -233,47 +339,54 @@ def prune_analysis_jobs() -> None:
         del analysis_jobs[job_id]
 
 
-async def compare_documents(papers: list[UploadFile], materials: list[UploadFile], syllabus: str) -> dict:
-    paper_texts, notes = [], []
-    for upload in papers:
-        logger.info("Reading paper: %s", upload.filename)
-        text = await read_document(upload)
-        logger.info("Extracted %s characters from %s", len(text), upload.filename)
-        paper_texts.append(text[:90000])
-    for upload in materials:
-        text = await read_document(upload)
+async def compare_documents(papers: list[UploadFile], materials: list[UploadFile], syllabus: str, progress=None) -> dict:
+    extracted, notes = [], []
+    for index, upload in enumerate(papers, 1):
+        if progress:
+            progress(f"Reading paper {index} of {len(papers)}: {upload.filename}")
+        logger.info("Analyzing paper: %s", upload.filename)
+        extracted.extend(await extract_paper(upload, progress))
+    for index, upload in enumerate(materials, 1):
+        if progress:
+            progress(f"Reading reference {index} of {len(materials)}: {upload.filename}")
+        text = await read_document(upload, progress)
         notes.append(text[:60000])
 
-    prompt = """Analyse these past exam papers for a student preparing to revise. Treat the supplied papers and syllabus as the only evidence. Do not claim to know or guarantee future exam questions. Return a single JSON object with keys: summary (string), questions (array), patterns (array of strings), practice (array of strings). Each question must have paper (filename), page (string or number if identifiable), question (faithful text), concept (short normalized topic), marks (integer or null), type (short label), and repeat (one of exact, reworded, topic, new). Include every readable question and subquestion; keep alternatives distinct. Use repeat=exact only for the same question, reworded for the same ask with changed wording, topic for a recurring concept asked differently, and new when it appears once. Patterns should describe observed structure and coverage. Practice should contain plausible new practice questions based on recurring concepts, labelled as practice, never as predictions with probabilities. Use valid JSON only."""
-    user_content = [{"type": "text", "text": prompt + "\n\nSyllabus:\n" + (syllabus[:12000] or "Not provided.") + "\n\nPast papers:\n" + "\n\n".join(paper_texts)}]
-    logger.info("Comparing %s extracted papers", len(paper_texts))
+    if progress:
+        progress("Comparing questions and recurring topics across papers")
+    logger.info("Comparing %s extracted questions from %s papers", len(extracted), len(papers))
+    prompt = """Compare these numbered questions from past exam papers for a student preparing to revise. Treat the supplied questions, syllabus, and references as the only evidence. Do not claim to know or guarantee future exam questions. Return one JSON object with summary (string), classifications (array of objects with index and repeat), patterns (array of strings), and practice (array of strings). Return exactly one classification for every question index, without repeating the question text. Set repeat to exact only for the same question, reworded for the same ask with changed wording, topic for a recurring concept asked differently, and new when it appears once. Patterns should describe observed structure and coverage. Practice should contain plausible new practice questions based on recurring concepts, labelled as practice, never as predictions with probabilities. Use valid JSON only."""
+    context = "\n\nSyllabus:\n" + (syllabus[:12000] or "Not provided.")
+    if notes:
+        context += "\n\nReference material (context only):\n" + "\n\n".join(notes)[:12000]
+    question_data = json.dumps([question.model_dump() for question in extracted], ensure_ascii=False, separators=(",", ":"))
     raw = await run_in_threadpool(
-        answer, [{"role": "user", "content": user_content}],
-        max_tokens=12000, reasoning_effort="low",
-        response_format={"type": "json_schema", "json_schema": {"name": "paper_analysis", "strict": True, "schema": AnalysisReport.model_json_schema()}},
+        answer, [{"role": "user", "content": [{"type": "text", "text": prompt + context + "\n\nExtracted questions:\n" + question_data}]}],
+        max_tokens=4000, reasoning_effort="low",
+        response_format={"type": "json_schema", "json_schema": {"name": "question_comparison", "strict": True, "schema": ComparisonReport.model_json_schema()}},
     )
     try:
-        report = AnalysisReport.model_validate(parse_json(raw)).model_dump()
+        comparison = ComparisonReport.model_validate(parse_json(raw))
     except ValidationError as exc:
         raise HTTPException(status_code=502, detail="The model returned an incomplete report. Please retry.") from exc
-    questions = report.get("questions")
-    if not isinstance(questions, list):
-        raise HTTPException(status_code=502, detail="The model analysis did not include a question list. Please retry.")
-    questions = [question for question in questions if isinstance(question, dict)]
+    classifications = {item.index: item.repeat for item in comparison.classifications}
+    if set(classifications) != set(range(len(extracted))):
+        raise HTTPException(status_code=502, detail="The model did not classify every extracted question. Please retry.")
+    questions = [question.model_copy(update={"repeat": classifications[index]}).model_dump() for index, question in enumerate(extracted)]
     if not questions:
         raise HTTPException(status_code=502, detail="No readable questions were returned. Check the scan and try again.")
     topics = group_topics(questions)
     thread_id = str(uuid.uuid4())
-    threads[thread_id] = {"context": "\n\n".join(paper_texts + notes)[:250000], "messages": []}
+    threads[thread_id] = {"context": ("Extracted paper questions:\n" + question_data + "\n\nReference material:\n" + "\n\n".join(notes))[:250000], "messages": []}
     while len(threads) > 30:
         threads.pop(next(iter(threads)))
     return {
         "thread_id": thread_id,
-        "summary": str(report.get("summary", "")),
+        "summary": comparison.summary,
         "questions": questions,
         "topics": topics,
-        "patterns": report.get("patterns", []),
-        "practice": report.get("practice", []),
+        "patterns": comparison.patterns,
+        "practice": comparison.practice,
         "paper_count": len(papers),
         "material_count": len(materials),
     }
@@ -285,7 +398,7 @@ async def process_analysis(job_id: str, staged_papers: list[tuple[str, str]], st
         papers = [UploadFile(filename=name, file=Path(path).open("rb")) for name, path in staged_papers]
         materials = [UploadFile(filename=name, file=Path(path).open("rb")) for name, path in staged_materials]
         uploads = papers + materials
-        result = await compare_documents(papers, materials, syllabus)
+        result = await compare_documents(papers, materials, syllabus, lambda message: analysis_jobs[job_id].update(progress=message, updated=time.monotonic()))
         analysis_jobs[job_id].update(status="complete", result=result, updated=time.monotonic())
     except HTTPException as exc:
         analysis_jobs[job_id].update(status="failed", detail=exc.detail, updated=time.monotonic())
@@ -302,7 +415,7 @@ async def process_analysis(job_id: str, staged_papers: list[tuple[str, str]], st
 
 @app.get("/api/health")
 def health():
-    return {"ready": bool(os.getenv("NVIDIA_API_KEY")), "model": MODEL}
+    return {"ready": bool(os.getenv("GEMINI_API_KEY")), "model": MODEL, "fallback_model": FALLBACK_MODEL}
 
 
 @app.post("/api/analyze", status_code=202)
@@ -331,7 +444,7 @@ async def analyze(
         raise
 
     job_id = str(uuid.uuid4())
-    analysis_jobs[job_id] = {"status": "processing", "updated": time.monotonic()}
+    analysis_jobs[job_id] = {"status": "processing", "progress": "Preparing files", "updated": time.monotonic()}
     task = asyncio.create_task(process_analysis(job_id, staged_papers, staged_materials, syllabus))
     analysis_tasks.add(task)
     task.add_done_callback(analysis_tasks.discard)
@@ -348,7 +461,7 @@ def analysis_status(job_id: str):
         return {"status": "complete", "result": job["result"]}
     if job["status"] == "failed":
         return {"status": "failed", "detail": job["detail"]}
-    return {"status": "processing"}
+    return {"status": "processing", "progress": job.get("progress", "Analyzing papers")}
 
 
 @app.post("/api/chat")

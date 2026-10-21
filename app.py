@@ -266,7 +266,3 @@ else:
     @app.get("/")
     def frontend_not_built():
         return HTMLResponse("Build the React site with npm install and npm run build in frontend/.", status_code=503)
-
-
-
-

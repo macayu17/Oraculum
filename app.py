@@ -24,7 +24,7 @@ from pydantic import BaseModel, ValidationError
 
 ROOT = Path(__file__).parent
 load_dotenv(ROOT / ".env")
-MODEL = "deepseek-ai/deepseek-v4.1-flash"
+MODEL = "z-ai/glm-5.3-flash"
 BASE_URL = "https://integrate.api.nvidia.com/v1"
 MAX_FILE_BYTES = 20 * 1024 * 1024
 MAX_PAGES = 40
@@ -79,7 +79,7 @@ def get_client() -> OpenAI:
     return OpenAI(api_key=key, base_url=BASE_URL, timeout=180, max_retries=1)
 
 
-def answer(messages: list[dict], *, max_tokens: int = 6000, reasoning_effort: str = "none", response_format: dict | None = None) -> str:
+def answer(messages: list[dict], *, max_tokens: int = 6000, reasoning_effort: str = "low", response_format: dict | None = None) -> str:
     try:
         result = get_client().chat.completions.create(
             model=MODEL,
@@ -89,6 +89,7 @@ def answer(messages: list[dict], *, max_tokens: int = 6000, reasoning_effort: st
             max_tokens=max_tokens,
             stream=False,
             reasoning_effort=reasoning_effort,
+            extra_body={"chat_template_kwargs": {"clear_thinking": True}},
             response_format=response_format or NOT_GIVEN,
         )
         if result.choices[0].finish_reason == "length":
@@ -114,7 +115,7 @@ async def read_document(upload: UploadFile) -> str:
         raise HTTPException(status_code=413, detail=f"{filename} exceeds the 20 MB limit.")
     if suffix in image_types:
         media = [{"type": "image_url", "image_url": {"url": f"data:{image_types[suffix]};base64," + base64.b64encode(raw).decode("ascii")}}]
-        transcription = await run_in_threadpool(answer, [{"role": "user", "content": [{"type": "text", "text": f"Transcribe this exam or study-material image faithfully. Preserve question numbering, equations, choices, and marks. Mark illegible text as [unclear]. Begin with the source label [{filename}, page 1]. Return plain text only."}, *media]}], max_tokens=12000, reasoning_effort="none")
+        transcription = await run_in_threadpool(answer, [{"role": "user", "content": [{"type": "text", "text": f"Transcribe this exam or study-material image faithfully. Preserve question numbering, equations, choices, and marks. Mark illegible text as [unclear]. Begin with the source label [{filename}, page 1]. Return plain text only."}, *media]}], max_tokens=12000, reasoning_effort="low")
         if not transcription.strip():
             raise HTTPException(status_code=400, detail=f"No readable text found in {filename}.")
         return f"[{filename}, page 1]\n{transcription}"
@@ -139,7 +140,7 @@ async def read_document(upload: UploadFile) -> str:
                     {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + base64.b64encode(image).decode("ascii")}},
                 ]}],
                 max_tokens=6000,
-                reasoning_effort="none",
+                reasoning_effort="low",
             )
             for _, _, image in batch
         ))
@@ -248,7 +249,7 @@ async def compare_documents(papers: list[UploadFile], materials: list[UploadFile
     logger.info("Comparing %s extracted papers", len(paper_texts))
     raw = await run_in_threadpool(
         answer, [{"role": "user", "content": user_content}],
-        max_tokens=12000, reasoning_effort="none",
+        max_tokens=12000, reasoning_effort="low",
         response_format={"type": "json_schema", "json_schema": {"name": "paper_analysis", "strict": True, "schema": AnalysisReport.model_json_schema()}},
     )
     try:
@@ -364,7 +365,7 @@ def chat(request: ChatRequest):
         *thread["messages"][-10:],
         {"role": "user", "content": request.message.strip()},
     ]
-    reply = answer(messages, max_tokens=3000, reasoning_effort="none")
+    reply = answer(messages, max_tokens=3000, reasoning_effort="low")
     thread["messages"].extend([{"role": "user", "content": request.message.strip()}, {"role": "assistant", "content": reply}])
     return {"reply": reply}
 

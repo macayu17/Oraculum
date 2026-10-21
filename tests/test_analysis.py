@@ -18,10 +18,10 @@ class ModelRequestTests(unittest.TestCase):
         create = Mock(return_value=SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="A reply"), finish_reason="stop")]))
         client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
         with patch.object(app, "get_client", return_value=client):
-            self.assertEqual(app.answer([], reasoning_effort="none"), "A reply")
-        self.assertEqual(create.call_args.kwargs["model"], "deepseek-ai/deepseek-v4.1-flash")
-        self.assertEqual(create.call_args.kwargs["reasoning_effort"], "none")
-        self.assertNotIn("extra_body", create.call_args.kwargs)
+            self.assertEqual(app.answer([], reasoning_effort="low"), "A reply")
+        self.assertEqual(create.call_args.kwargs["model"], "z-ai/glm-5.3-flash")
+        self.assertEqual(create.call_args.kwargs["reasoning_effort"], "low")
+        self.assertEqual(create.call_args.kwargs["extra_body"], {"chat_template_kwargs": {"clear_thinking": True}})
 
 
     def test_truncated_completion_is_not_returned_as_a_report(self):
@@ -81,7 +81,7 @@ class UploadResponsivenessTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(text.startswith("[scan.pdf, page 1]"))
         self.assertIn("[scan.pdf, page 2]", text)
         self.assertEqual(answer.call_count, 2)
-        self.assertEqual(answer.call_args.kwargs["reasoning_effort"], "none")
+        self.assertEqual(answer.call_args.kwargs["reasoning_effort"], "low")
         image_url = answer.call_args_list[0].args[0][0]["content"][1]["image_url"]["url"]
         self.assertTrue(image_url.startswith("data:image/jpeg;base64,"))
         image = pymupdf.Pixmap(base64.b64decode(image_url.split(",", 1)[1]))
@@ -107,7 +107,7 @@ class UploadResponsivenessTests(unittest.IsolatedAsyncioTestCase):
         safety_timer.start()
 
         def slow_answer(*args, **kwargs):
-            self.assertEqual(kwargs["reasoning_effort"], "none")
+            self.assertEqual(kwargs["reasoning_effort"], "low")
             self.assertEqual(kwargs["response_format"]["type"], "json_schema")
             started.set()
             release.wait()

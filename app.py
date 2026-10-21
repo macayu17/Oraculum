@@ -90,6 +90,11 @@ class ComparisonReport(BaseModel):
     practice: list[str]
 
 
+class ClassificationRepair(BaseModel):
+    model_config = {"extra": "forbid"}
+    classifications: list[QuestionClassification]
+
+
 @lru_cache(maxsize=1)
 def get_client() -> genai.Client:
     key = os.getenv("GEMINI_API_KEY")
@@ -372,6 +377,24 @@ async def compare_documents(papers: list[UploadFile], materials: list[UploadFile
     classifications = {item.index: item.repeat for item in comparison.classifications}
     if set(classifications) == set(range(1, len(extracted) + 1)):
         classifications = {index - 1: repeat for index, repeat in classifications.items()}
+    missing = sorted(set(range(len(extracted))) - set(classifications))
+    if missing:
+        logger.warning("Retrying classification for %s omitted questions", len(missing))
+        repair_prompt = """Classify only the requested zero-based question indexes. Compare each against the full supplied question list and use exact, reworded, topic, or new. Return exactly one classification for each requested index, with no summary, patterns, or practice."""
+        repair_raw = await run_in_threadpool(
+            answer,
+            [{"role": "user", "content": [{"type": "text", "text": repair_prompt + "\nRequested indexes: " + json.dumps(missing) + "\n\nAll extracted questions:\n" + question_data}]}],
+            max_tokens=min(4000, max(500, len(missing) * 50)), reasoning_effort="low",
+            response_format={"type": "json_schema", "json_schema": {"name": "classification_repair", "strict": True, "schema": ClassificationRepair.model_json_schema()}},
+        )
+        try:
+            repaired = ClassificationRepair.model_validate(parse_json(repair_raw)).classifications
+        except ValidationError as exc:
+            raise HTTPException(status_code=502, detail="The model could not complete question classification. Please retry.") from exc
+        repaired_map = {item.index: item.repeat for item in repaired}
+        if set(repaired_map) == {index + 1 for index in missing}:
+            repaired_map = {index - 1: repeat for index, repeat in repaired_map.items()}
+        classifications.update({index: repeat for index, repeat in repaired_map.items() if index in missing})
     if set(classifications) != set(range(len(extracted))):
         raise HTTPException(status_code=502, detail="The model did not classify every extracted question. Please retry.")
     questions = [question.model_copy(update={"repeat": classifications[index]}).model_dump() for index, question in enumerate(extracted)]

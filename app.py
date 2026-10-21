@@ -26,8 +26,8 @@ from pydantic import BaseModel, ValidationError
 
 ROOT = Path(__file__).parent
 load_dotenv(ROOT / ".env")
-MODEL = "gemini-3.8-flash"
-FALLBACK_MODEL = "gemini-3.6-flash"
+MODELS = ("gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite")
+MODEL = MODELS[0]
 MAX_FILE_BYTES = 20 * 1024 * 1024
 MAX_PAGES = 40
 SCAN_BATCH_SIZE = 3
@@ -138,13 +138,13 @@ def answer(messages: list[dict], *, max_tokens: int = 6000, reasoning_effort: st
             response_mime_type="application/json" if schema else None,
             response_json_schema=schema,
         )
-        for model in (MODEL, FALLBACK_MODEL):
+        for index, model in enumerate(MODELS):
             try:
                 result = client.models.generate_content(model=model, contents=contents, config=config)
                 break
             except Exception as exc:
-                if model == MODEL and getattr(exc, "code", None) in {429, 500, 502, 503, 504}:
-                    logger.warning("Gemini model %s unavailable (%s); retrying with %s", model, exc.code, FALLBACK_MODEL)
+                if index < len(MODELS) - 1 and getattr(exc, "code", None) in {429, 500, 502, 503, 504}:
+                    logger.warning("Gemini model %s unavailable (%s); retrying with %s", model, exc.code, MODELS[index + 1])
                     continue
                 raise
         if result.candidates and result.candidates[0].finish_reason == types.FinishReason.MAX_TOKENS:
@@ -415,7 +415,7 @@ async def process_analysis(job_id: str, staged_papers: list[tuple[str, str]], st
 
 @app.get("/api/health")
 def health():
-    return {"ready": bool(os.getenv("GEMINI_API_KEY")), "model": MODEL, "fallback_model": FALLBACK_MODEL}
+    return {"ready": bool(os.getenv("GEMINI_API_KEY")), "model": MODEL, "fallback_models": MODELS[1:]}
 
 
 @app.post("/api/analyze", status_code=202)

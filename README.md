@@ -18,7 +18,7 @@ Practice questions are study prompts based on the supplied material. They are no
 
 - React and Vite frontend
 - FastAPI backend
-- Gemini 3.8 Flash, with Gemini 3.6 Flash as an overload fallback
+- Gemini 3.8 Flash, with Gemini 3.6 Flash and Gemini 3.5 Flash-Lite as overload fallbacks
 - Google Gen AI Python SDK and PyMuPDF for native PDF input and validation
 
 ## Run locally
@@ -69,7 +69,7 @@ Then open [http://127.0.0.1:8000](http://127.0.0.1:8000).
 - Each analysis accepts up to 12 exam papers and 8 reference files.
 - Question papers are sent to Gemini as PDF or image input for question extraction and analysis. Reference material may be converted to text first.
 - Uploaded text and study sessions are held in backend memory. They are cleared when the backend restarts. The application does not use accounts or persistent document storage.
-- Temporary Gemini capacity errors fall back from Gemini 3.8 Flash to Gemini 3.6 Flash. Other request failures are shown so the analysis can be retried.
+- Temporary Gemini capacity errors fall back from Gemini 3.8 Flash to Gemini 3.6 Flash and Gemini 3.5 Flash-Lite. Other request failures are shown so the analysis can be retried.
 
 Only upload material you are permitted to share with Google's hosted Gemini API. Free-tier prompts and responses may be used to improve Google's products; review the current API terms before uploading sensitive material.
 

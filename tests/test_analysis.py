@@ -40,7 +40,17 @@ class ModelRequestTests(unittest.TestCase):
         client = SimpleNamespace(models=SimpleNamespace(generate_content=generate))
         with patch.object(app, "get_client", return_value=client):
             self.assertEqual(app.answer([], reasoning_effort="low"), "A reply")
-        self.assertEqual([call.kwargs["model"] for call in generate.call_args_list], ["gemini-3.8-flash", "gemini-3.6-flash"])
+        self.assertEqual([call.kwargs["model"] for call in generate.call_args_list], list(app.MODELS[:2]))
+
+    def test_falls_through_to_flash_lite_after_two_models_are_overloaded(self):
+        class Overloaded(Exception):
+            code = 503
+
+        generate = Mock(side_effect=[Overloaded(), Overloaded(), SimpleNamespace(candidates=[], text="A reply")])
+        client = SimpleNamespace(models=SimpleNamespace(generate_content=generate))
+        with patch.object(app, "get_client", return_value=client):
+            self.assertEqual(app.answer([]), "A reply")
+        self.assertEqual([call.kwargs["model"] for call in generate.call_args_list], list(app.MODELS))
 
     def test_reports_a_retryable_error_when_both_models_are_overloaded(self):
         class Overloaded(Exception):
@@ -51,6 +61,7 @@ class ModelRequestTests(unittest.TestCase):
             with self.assertRaises(app.HTTPException) as error:
                 app.answer([])
         self.assertEqual(error.exception.status_code, 503)
+        self.assertEqual(client.models.generate_content.call_count, len(app.MODELS))
         self.assertIn("temporarily overloaded", error.exception.detail)
 
 

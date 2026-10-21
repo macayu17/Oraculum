@@ -355,7 +355,7 @@ async def compare_documents(papers: list[UploadFile], materials: list[UploadFile
     if progress:
         progress("Comparing questions and recurring topics across papers")
     logger.info("Comparing %s extracted questions from %s papers", len(extracted), len(papers))
-    prompt = """Compare these numbered questions from past exam papers for a student preparing to revise. Treat the supplied questions, syllabus, and references as the only evidence. Do not claim to know or guarantee future exam questions. Return one JSON object with summary (string), classifications (array of objects with index and repeat), patterns (array of strings), and practice (array of strings). Return exactly one classification for every question index, without repeating the question text. Set repeat to exact only for the same question, reworded for the same ask with changed wording, topic for a recurring concept asked differently, and new when it appears once. Patterns should describe observed structure and coverage. Practice should contain plausible new practice questions based on recurring concepts, labelled as practice, never as predictions with probabilities. Use valid JSON only."""
+    prompt = """Compare these numbered questions from past exam papers for a student preparing to revise. Treat the supplied questions, syllabus, and references as the only evidence. Do not claim to know or guarantee future exam questions. Return one JSON object with summary (string), classifications (array of objects with index and repeat), patterns (array of strings), and practice (array of strings). Return exactly one classification for every question index, without repeating the question text. The index is the zero-based array position: the first supplied question is index 0, the second is index 1, and so on. Set repeat to exact only for the same question, reworded for the same ask with changed wording, topic for a recurring concept asked differently, and new when it appears once. Patterns should describe observed structure and coverage. Practice should contain plausible new practice questions based on recurring concepts, labelled as practice, never as predictions with probabilities. Use valid JSON only."""
     context = "\n\nSyllabus:\n" + (syllabus[:12000] or "Not provided.")
     if notes:
         context += "\n\nReference material (context only):\n" + "\n\n".join(notes)[:12000]
@@ -370,6 +370,8 @@ async def compare_documents(papers: list[UploadFile], materials: list[UploadFile
     except ValidationError as exc:
         raise HTTPException(status_code=502, detail="The model returned an incomplete report. Please retry.") from exc
     classifications = {item.index: item.repeat for item in comparison.classifications}
+    if set(classifications) == set(range(1, len(extracted) + 1)):
+        classifications = {index - 1: repeat for index, repeat in classifications.items()}
     if set(classifications) != set(range(len(extracted))):
         raise HTTPException(status_code=502, detail="The model did not classify every extracted question. Please retry.")
     questions = [question.model_copy(update={"repeat": classifications[index]}).model_dump() for index, question in enumerate(extracted)]

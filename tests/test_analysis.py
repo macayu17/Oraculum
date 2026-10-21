@@ -149,7 +149,7 @@ class UploadResponsivenessTests(unittest.IsolatedAsyncioTestCase):
 
         responses = iter([
             {"questions": [{"paper": "test.pdf", "concept": "Algebra", "question": "Solve x=1", "marks": 1, "page": 1, "type": "Solve", "repeat": "new"}]},
-            {"summary": "Test", "classifications": [{"index": 0, "repeat": "new"}], "patterns": [], "practice": []},
+            {"summary": "Test", "classifications": [{"index": 1, "repeat": "topic"}], "patterns": [], "practice": []},
         ])
 
         def slow_answer(*args, **kwargs):
@@ -187,7 +187,7 @@ class UploadResponsivenessTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(status.json()["status"], "complete")
                     self.assertEqual(status.json()["result"]["paper_count"], 1)
                     self.assertEqual(status.json()["result"]["questions"][0]["question"], "Solve x=1")
-                    self.assertEqual(status.json()["result"]["questions"][0]["repeat"], "new")
+                    self.assertEqual(status.json()["result"]["questions"][0]["repeat"], "topic")
         finally:
             release.set()
             safety_timer.cancel()

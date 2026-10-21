@@ -2,6 +2,8 @@
 
 Oraculum is a React study workspace backed by FastAPI. It reads past exam PDFs and page images, compares question patterns, builds a source-linked revision shortlist, and answers follow-up questions using uploaded papers and optional notes. Practice prompts are for revision, not exam predictions.
 
+Website: <https://oraculum-one.vercel.app> · API health: <https://oraculum-api-og1a.onrender.com/api/health>
+
 ## Run locally on Windows
 
 Copy `.env.example` to `.env` and set `NVIDIA_API_KEY`. FastAPI loads this ignored file; keep it out of GitHub. The key is never sent to the browser.

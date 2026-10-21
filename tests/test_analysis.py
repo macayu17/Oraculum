@@ -34,6 +34,40 @@ class ModelRequestTests(unittest.TestCase):
 
 
 class UploadResponsivenessTests(unittest.IsolatedAsyncioTestCase):
+    async def test_scanned_pdf_transcribes_pages_concurrently_in_source_order(self):
+        document = pymupdf.open()
+        for _ in range(4):
+            document.new_page()
+        upload = app.UploadFile(filename="scan.pdf", file=BytesIO(document.tobytes()))
+        document.close()
+        active = peak = invoked = 0
+        lock = threading.Lock()
+        first_batch = threading.Barrier(3)
+
+        def transcribe(messages, **kwargs):
+            nonlocal active, peak, invoked
+            with lock:
+                invoked += 1
+                page = invoked
+                active += 1
+                peak = max(peak, active)
+            if page <= 3:
+                first_batch.wait(timeout=2)
+            with lock:
+                active -= 1
+            return f"Transcription {page}"
+
+        with patch.object(app, "answer", side_effect=transcribe) as answer:
+            text = await app.read_document(upload)
+
+        self.assertEqual(peak, 3)
+        self.assertLessEqual(peak, 3)
+        self.assertEqual(
+            [text.index(f"[scan.pdf, page {page}]") for page in range(1, 5)],
+            sorted(text.index(f"[scan.pdf, page {page}]") for page in range(1, 5)),
+        )
+        self.assertEqual(answer.call_count, 4)
+
     async def test_scanned_pdf_uses_bounded_jpeg(self):
         document = pymupdf.open()
         document.new_page(width=3000, height=4000)

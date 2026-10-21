@@ -1,4 +1,5 @@
 import base64
+import asyncio
 import json
 import logging
 import os
@@ -25,6 +26,7 @@ MODEL = "nvidia/nemotron-3.5-super-vl-120b-a12b"
 BASE_URL = "https://integrate.api.nvidia.com/v1"
 MAX_FILE_BYTES = 20 * 1024 * 1024
 MAX_PAGES = 40
+SCAN_BATCH_SIZE = 3
 threads: dict[str, dict] = {}
 logger = logging.getLogger("uvicorn.error")
 
@@ -121,29 +123,47 @@ async def read_document(upload: UploadFile) -> str:
     if len(pdf) > MAX_PAGES:
         raise HTTPException(status_code=413, detail=f"{filename} has more than {MAX_PAGES} pages.")
 
-    pages = []
+    pages: list[str | None] = [None] * len(pdf)
+    scan_batch = []
+
+    async def transcribe_batch(batch):
+        texts = await asyncio.gather(*(
+            run_in_threadpool(
+                answer,
+                [{"role": "user", "content": [
+                    {"type": "text", "text": "Transcribe this page faithfully. Preserve question numbering, equations, tables, choices, and marks. Mark illegible text as [unclear]. Return the page text only."},
+                    {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + base64.b64encode(image).decode("ascii")}},
+                ]}],
+                max_tokens=6000,
+                reasoning_effort="none",
+            )
+            for _, _, image in batch
+        ))
+        for (index, source, _), text in zip(batch, texts):
+            pages[index] = f"{source}\n{text}"
+            logger.info("Transcribed %s", source)
+
     try:
-        for number, page in enumerate(pdf, 1):
+        for index, page in enumerate(pdf):
+            number = index + 1
             source = f"[{filename}, page {number}]"
             text = page.get_text().strip()
             if not text:
                 scale = min(2.0, 2000 / max(page.rect.width, page.rect.height))
                 image = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False).tobytes("jpeg", jpg_quality=85)
                 logger.info("Transcribing %s page %s of %s", filename, number, len(pdf))
-                text = await run_in_threadpool(
-                    answer,
-                    [{"role": "user", "content": [
-                        {"type": "text", "text": "Transcribe this page faithfully. Preserve question numbering, equations, tables, choices, and marks. Mark illegible text as [unclear]. Return the page text only."},
-                        {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + base64.b64encode(image).decode("ascii")}},
-                    ]}],
-                    max_tokens=6000,
-                    reasoning_effort="none",
-                )
-            pages.append(f"{source}\n{text}")
+                scan_batch.append((index, source, image))
+                if len(scan_batch) == SCAN_BATCH_SIZE:
+                    await transcribe_batch(scan_batch)
+                    scan_batch = []
+            else:
+                pages[index] = f"{source}\n{text}"
+        if scan_batch:
+            await transcribe_batch(scan_batch)
     finally:
         pdf.close()
 
-    content = "\n\n".join(pages).strip()
+    content = "\n\n".join(page for page in pages if page).strip()
     if not content:
         raise HTTPException(status_code=400, detail=f"No readable text found in {filename}.")
     return content

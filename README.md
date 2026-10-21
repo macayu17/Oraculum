@@ -1,14 +1,39 @@
 # Oraculum
 
-Oraculum is a React study workspace backed by FastAPI. It reads past exam PDFs and page images, compares question patterns, builds a source-linked revision shortlist, and answers follow-up questions using uploaded papers and optional notes. Practice prompts are for revision, not exam predictions.
+Oraculum helps students review past exam papers. It extracts questions from PDFs and images, compares topics and question patterns, and builds a revision list with references to the source papers. Students can also ask follow-up questions using their uploaded papers and notes.
 
-Website: <https://oraculum-one.vercel.app> · API health: <https://oraculum-api-og1a.onrender.com/api/health>
+Practice questions are study prompts based on the supplied material. They are not predictions of future exam questions.
 
-## Run locally on Windows
+**Website:** [oraculum-one.vercel.app](https://oraculum-one.vercel.app) | **Backend health:** [oraculum-api-og1a.onrender.com/api/health](https://oraculum-api-og1a.onrender.com/api/health)
 
-Copy `.env.example` to `.env` and set `NVIDIA_API_KEY`. FastAPI loads this ignored file; keep it out of GitHub. The key is never sent to the browser.
+## Features
 
-Open two PowerShell terminals in the project folder. In the first:
+- Analyze text-based and scanned exam papers.
+- Compare questions, recurring topics, marks, and paper structure.
+- Review source-linked questions, patterns, and practice prompts.
+- Ask a study assistant questions grounded in the uploaded papers and notes.
+- Upload PDF, PNG, and JPEG files.
+
+## Technology
+
+- React and Vite frontend
+- FastAPI backend
+- NVIDIA Nemotron 3.5 Super VL through the NVIDIA API
+- PyMuPDF for PDF text extraction and page rendering
+
+## Run locally
+
+Requirements: Python 3.13 or later and Node.js.
+
+Create a project-root `.env` file from the example and add your NVIDIA API key:
+
+```powershell
+Copy-Item .env.example .env
+```
+
+Set `NVIDIA_API_KEY` in `.env`. The key is read by the backend and must not be committed or added to frontend environment variables.
+
+In one PowerShell terminal, install and start the backend:
 
 ```powershell
 python -m venv .venv
@@ -17,7 +42,7 @@ python -m pip install -r requirements.txt
 python -m uvicorn app:app --reload
 ```
 
-In the second:
+In a second terminal, start the frontend:
 
 ```powershell
 cd frontend
@@ -25,26 +50,65 @@ npm install
 npm run dev
 ```
 
-Open <http://127.0.0.1:5173>. Vite proxies API requests to FastAPI. For a single production server, run `npm run build` inside `frontend/`, then start FastAPI and open <http://127.0.0.1:8000>. For another machine, create a local `.env` file containing `NVIDIA_API_KEY=your NVIDIA API key`.
+Open [http://127.0.0.1:5173](http://127.0.0.1:5173). During local development, Vite proxies API requests to the backend on port 8000.
 
-## Uploads and limits
+To serve the built frontend from FastAPI, build it first:
 
-- Papers and reference material may be PDFs, PNGs, or JPEGs. Text PDFs are read directly; scans and images are transcribed with the vision model.
-- Up to 12 papers and 8 reference files per analysis; each file is limited to 20 MB and each PDF to 40 pages.
-- Uploaded contents are sent to NVIDIA's hosted model for analysis and answers. Check extracted questions against the source where scan quality is poor.
-- Transient NVIDIA request failures are retried once; persistent failures are shown in the workspace so you can retry the analysis.
-- Study sessions and extracted text stay in server memory and are cleared when it restarts. The app has no accounts or persistent document storage.
-- Do not upload material you are not allowed to share with that service.
+```powershell
+cd frontend
+npm run build
+cd ..
+python -m uvicorn app:app --host 127.0.0.1 --port 8000
+```
 
-## Checks
+Then open [http://127.0.0.1:8000](http://127.0.0.1:8000).
 
-Run `python -m unittest discover -s tests -v` in the activated backend environment and `npm run build` inside `frontend/`. The automated checks cover model reasoning parameters, server responsiveness during generation, per-page scan conversion/source labels, and conversation structure. They stub model responses; real NVIDIA inference also needs a live upload check.
+## Upload limits and data handling
 
-## Deploy on Render and Vercel
+- Each file can be up to 20 MB. PDFs can contain up to 40 pages.
+- Each analysis accepts up to 12 exam papers and 8 reference files.
+- Scanned pages and images are sent to NVIDIA for transcription and analysis. Text-based PDFs are extracted locally before analysis.
+- Uploaded text and study sessions are held in backend memory. They are cleared when the backend restarts. The application does not use accounts or persistent document storage.
+- A failed NVIDIA request is retried once. If it still fails, the application displays an error so the analysis can be retried.
 
-1. Import this repository as a Render Blueprint using `render.yaml`. Set `NVIDIA_API_KEY` in Render's environment settings. Set `FRONTEND_ORIGINS` to your exact Vercel production origin, such as `https://your-project.vercel.app` (comma-separated if you have additional domains).
-2. Import the repository into Vercel with **Root Directory** set to `frontend`. Its `vercel.json` configures the Vite build. Set `VITE_API_BASE_URL` to the Render service URL, with no path, before deploying.
-3. Once the Vercel URL is assigned, update Render's `FRONTEND_ORIGINS` to match and redeploy the backend. Changing `VITE_API_BASE_URL` requires rebuilding the frontend.
-4. Check `<Render URL>/api/health` reports `ready: true`, then upload papers through the Vercel website and test a follow-up question.
+Only upload material you are permitted to share with NVIDIA's hosted API.
 
-Uploads go directly from the browser to Render, avoiding Vercel function upload limits. Keep one Render instance and one worker: study sessions are in process memory. No database is required. Sessions disappear on backend restarts, redeploys, and free-tier idle shutdowns. Render's free tier may take about a minute to wake after inactivity; it is suitable for a demo, with no paid resources required by this configuration.
+## Deploy
+
+The frontend is hosted on Vercel and the API is hosted on Render. The project is configured for deployment from the GitHub repository.
+
+### Render backend
+
+The root-level `render.yaml` configures a Python web service. Set these environment variables in Render:
+
+- `NVIDIA_API_KEY`: your NVIDIA API key.
+- `FRONTEND_ORIGINS`: the exact Vercel website origin, such as `https://your-project.vercel.app`.
+
+For additional domains, list their origins separated by commas. The deployed backend is available at [https://oraculum-api-og1a.onrender.com](https://oraculum-api-og1a.onrender.com).
+
+### Vercel frontend
+
+Import the repository into Vercel and set the project root directory to `frontend`. The `frontend/vercel.json` file configures the Vite build. Set `VITE_API_BASE_URL` to the Render backend URL, without a path, before building. This value is public frontend configuration; never put secrets in variables prefixed with `VITE_`.
+
+Uploads are sent directly from the browser to Render. After changing either service's environment variables, redeploy the relevant service. The frontend's production origin must match `FRONTEND_ORIGINS` on Render.
+
+## Verification
+
+Run the backend unit tests from the repository root:
+
+```powershell
+python -m unittest discover -s tests -v
+```
+
+Build the frontend:
+
+```powershell
+cd frontend
+npm run build
+```
+
+The unit tests use stubbed model responses. Testing real analysis requires a valid NVIDIA API key and an uploaded document.
+
+## Deployment notes
+
+The Render service uses one instance and one worker because study sessions are stored in process memory. No database is required for the current application. Sessions are lost when the service restarts, redeploys, or shuts down while idle. Render's free service may take about a minute to start after inactivity; this plan is intended for demonstrations and evaluation.

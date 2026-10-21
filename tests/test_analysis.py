@@ -100,7 +100,7 @@ class UploadResponsivenessTests(unittest.IsolatedAsyncioTestCase):
         finally:
             app.threads.pop(thread_id, None)
 
-    async def test_health_responds_while_analysis_waits_for_model(self):
+    async def test_analysis_returns_job_id_and_health_responds_while_model_waits(self):
         started, release = threading.Event(), threading.Event()
         safety_timer = threading.Timer(2, release.set)
         safety_timer.start()
@@ -120,13 +120,24 @@ class UploadResponsivenessTests(unittest.IsolatedAsyncioTestCase):
             with patch.object(app, "answer", side_effect=slow_answer):
                 async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app.app), base_url="http://test") as client:
                     upload = asyncio.create_task(client.post("/api/analyze", files={"papers": ("test.pdf", pdf, "application/pdf")}))
+                    response = await upload
+                    self.assertEqual(response.status_code, 202)
+                    job_id = response.json()["job_id"]
                     while not started.is_set():
                         await asyncio.sleep(0.01)
                     response = await client.get("/api/health")
                     self.assertEqual(response.status_code, 200)
                     self.assertFalse(release.is_set(), "Health waited for the model instead of responding during analysis")
+                    status = await client.get(f"/api/analyze/{job_id}")
+                    self.assertEqual(status.json()["status"], "processing")
                     release.set()
-                    self.assertEqual((await upload).status_code, 200)
+                    for _ in range(100):
+                        status = await client.get(f"/api/analyze/{job_id}")
+                        if status.json()["status"] != "processing":
+                            break
+                        await asyncio.sleep(0.01)
+                    self.assertEqual(status.json()["status"], "complete")
+                    self.assertEqual(status.json()["result"]["paper_count"], 1)
         finally:
             release.set()
             safety_timer.cancel()

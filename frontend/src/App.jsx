@@ -93,11 +93,21 @@ export default function App() {
       const response = await fetch(`${API_BASE_URL}/api/analyze`, { method: 'POST', body })
       const data = await response.json()
       if (!response.ok) throw new Error(data.detail || 'Analysis could not be completed.')
-      setReport(data)
-      setThreadId(data.thread_id)
+      let result = data
+      while (result.status === 'processing') {
+        await new Promise(resolve => setTimeout(resolve, 2000))
+        const statusResponse = await fetch(`${API_BASE_URL}/api/analyze/${data.job_id}`)
+        const status = await statusResponse.json()
+        if (!statusResponse.ok) throw new Error(status.detail || 'Analysis status could not be retrieved.')
+        if (status.status === 'failed') throw new Error(status.detail || 'Analysis could not be completed.')
+        if (status.status === 'complete') result = status.result
+        else result = status
+      }
+      setReport(result)
+      setThreadId(result.thread_id)
       document.getElementById('revision-map')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
     } catch (cause) {
-      setError(cause.message || 'Something went wrong. Please try again.')
+      setError(cause instanceof TypeError ? 'Connection to the analysis service was interrupted. Check your connection and try again.' : cause.message || 'Something went wrong. Please try again.')
     } finally { setBusy(false) }
   }
 

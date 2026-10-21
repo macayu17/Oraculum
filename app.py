@@ -4,6 +4,8 @@ import json
 import logging
 import os
 import re
+import tempfile
+import time
 import uuid
 from collections import defaultdict
 from pathlib import Path
@@ -28,6 +30,8 @@ MAX_FILE_BYTES = 20 * 1024 * 1024
 MAX_PAGES = 40
 SCAN_BATCH_SIZE = 3
 threads: dict[str, dict] = {}
+analysis_jobs: dict[str, dict] = {}
+analysis_tasks: set[asyncio.Task] = set()
 logger = logging.getLogger("uvicorn.error")
 
 app = FastAPI(title="Oraculum", docs_url=None, redoc_url=None)
@@ -199,23 +203,36 @@ def group_topics(questions: list[dict]) -> list[dict]:
     return sorted(topics, key=lambda item: (len(item["papers"]), item["count"], item["marks"]), reverse=True)
 
 
+async def stage_upload(upload: UploadFile) -> tuple[str, str]:
+    filename = upload.filename or "upload"
+    suffix = Path(filename).suffix.lower()
+    if suffix not in {".pdf", ".png", ".jpg", ".jpeg"}:
+        raise HTTPException(status_code=400, detail="Upload PDF, PNG, or JPEG files only.")
+    fd, staged_path = tempfile.mkstemp(suffix=suffix, prefix="oraculum-")
+    size = 0
+    try:
+        with os.fdopen(fd, "wb") as target:
+            while chunk := await upload.read(1024 * 1024):
+                size += len(chunk)
+                if size > MAX_FILE_BYTES:
+                    raise HTTPException(status_code=413, detail=f"{filename} exceeds the 20 MB limit.")
+                target.write(chunk)
+        return filename, staged_path
+    except Exception:
+        Path(staged_path).unlink(missing_ok=True)
+        raise
 
-@app.get("/api/health")
-def health():
-    return {"ready": bool(os.getenv("NVIDIA_API_KEY")), "model": MODEL}
+
+def prune_analysis_jobs() -> None:
+    expired = [
+        job_id for job_id, job in analysis_jobs.items()
+        if job["status"] != "processing" and time.monotonic() - job["updated"] > 3600
+    ]
+    for job_id in expired:
+        del analysis_jobs[job_id]
 
 
-@app.post("/api/analyze")
-async def analyze(
-    papers: list[UploadFile] = File(...),
-    materials: list[UploadFile] = File(default=[]),
-    syllabus: str = Form(default=""),
-):
-    if not papers:
-        raise HTTPException(status_code=400, detail="Upload at least one question paper.")
-    if len(papers) > 12 or len(materials) > 8:
-        raise HTTPException(status_code=413, detail="Upload at most 12 papers and 8 reference files at once.")
-
+async def compare_documents(papers: list[UploadFile], materials: list[UploadFile], syllabus: str) -> dict:
     paper_texts, notes = [], []
     for upload in papers:
         logger.info("Reading paper: %s", upload.filename)
@@ -259,6 +276,78 @@ async def analyze(
         "paper_count": len(papers),
         "material_count": len(materials),
     }
+
+
+async def process_analysis(job_id: str, staged_papers: list[tuple[str, str]], staged_materials: list[tuple[str, str]], syllabus: str) -> None:
+    uploads = []
+    try:
+        papers = [UploadFile(filename=name, file=Path(path).open("rb")) for name, path in staged_papers]
+        materials = [UploadFile(filename=name, file=Path(path).open("rb")) for name, path in staged_materials]
+        uploads = papers + materials
+        result = await compare_documents(papers, materials, syllabus)
+        analysis_jobs[job_id].update(status="complete", result=result, updated=time.monotonic())
+    except HTTPException as exc:
+        analysis_jobs[job_id].update(status="failed", detail=exc.detail, updated=time.monotonic())
+    except Exception:
+        logger.exception("Analysis job %s failed", job_id)
+        analysis_jobs[job_id].update(status="failed", detail="Analysis failed unexpectedly. Please try again.", updated=time.monotonic())
+    finally:
+        for upload in uploads:
+            await upload.close()
+        for _, path in staged_papers + staged_materials:
+            Path(path).unlink(missing_ok=True)
+
+
+
+@app.get("/api/health")
+def health():
+    return {"ready": bool(os.getenv("NVIDIA_API_KEY")), "model": MODEL}
+
+
+@app.post("/api/analyze", status_code=202)
+async def analyze(
+    papers: list[UploadFile] = File(...),
+    materials: list[UploadFile] = File(default=[]),
+    syllabus: str = Form(default=""),
+):
+    if not papers:
+        raise HTTPException(status_code=400, detail="Upload at least one question paper.")
+    if len(papers) > 12 or len(materials) > 8:
+        raise HTTPException(status_code=413, detail="Upload at most 12 papers and 8 reference files at once.")
+    prune_analysis_jobs()
+    if len(analysis_jobs) >= 50:
+        raise HTTPException(status_code=503, detail="The analysis queue is full. Try again shortly.")
+
+    staged_papers, staged_materials = [], []
+    try:
+        for upload in papers:
+            staged_papers.append(await stage_upload(upload))
+        for upload in materials:
+            staged_materials.append(await stage_upload(upload))
+    except Exception:
+        for _, path in staged_papers + staged_materials:
+            Path(path).unlink(missing_ok=True)
+        raise
+
+    job_id = str(uuid.uuid4())
+    analysis_jobs[job_id] = {"status": "processing", "updated": time.monotonic()}
+    task = asyncio.create_task(process_analysis(job_id, staged_papers, staged_materials, syllabus))
+    analysis_tasks.add(task)
+    task.add_done_callback(analysis_tasks.discard)
+    return {"job_id": job_id, "status": "processing"}
+
+
+@app.get("/api/analyze/{job_id}")
+def analysis_status(job_id: str):
+    prune_analysis_jobs()
+    job = analysis_jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="This analysis expired or was not found. Upload the papers again to start a new analysis.")
+    if job["status"] == "complete":
+        return {"status": "complete", "result": job["result"]}
+    if job["status"] == "failed":
+        return {"status": "failed", "detail": job["detail"]}
+    return {"status": "processing"}
 
 
 @app.post("/api/chat")

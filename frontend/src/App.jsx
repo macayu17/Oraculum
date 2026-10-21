@@ -133,7 +133,7 @@ export default function App() {
     <a className="skip-link" href="#main">Skip to workspace</a>
     <header className="topbar" id="top">
       <a className="wordmark" href="#top" aria-label="Oraculum home"><span className="wordmark-icon"><Icon name="mark" size={19}/></span><span>ORACULUM<span className="wordmark-dot">.</span></span></a>
-      <div className="topbar-right"><span className="topbar-section">PAPER ANALYSIS <span>/</span> WORKSPACE</span><span className="model-state"><i className={`status-dot ${apiReady === false ? 'status-needed' : ''}`}/>{apiReady === false ? 'MODEL UNAVAILABLE' : apiReady === null ? 'CHECKING MODEL' : 'NEMOTRON 3.5 · SUPER VL'}</span></div>
+      <div className="topbar-right"><span className="topbar-section">PAPER ANALYSIS <span>/</span> WORKSPACE</span><span className="model-state"><i className={`status-dot ${apiReady === false ? 'status-needed' : ''}`}/>{apiReady === false ? 'MODEL UNAVAILABLE' : apiReady === null ? 'CHECKING MODEL' : 'DEEPSEEK V4.1 · FLASH'}</span></div>
     </header>
 
     <main className="workspace" id="main">

@@ -19,6 +19,7 @@ class ModelRequestTests(unittest.TestCase):
         client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
         with patch.object(app, "get_client", return_value=client):
             self.assertEqual(app.answer([], reasoning_effort="none"), "A reply")
+        self.assertEqual(create.call_args.kwargs["model"], "deepseek-ai/deepseek-v4.1-flash")
         self.assertEqual(create.call_args.kwargs["reasoning_effort"], "none")
         self.assertNotIn("extra_body", create.call_args.kwargs)
 

@@ -24,7 +24,7 @@ from pydantic import BaseModel, ValidationError
 
 ROOT = Path(__file__).parent
 load_dotenv(ROOT / ".env")
-MODEL = "nvidia/nemotron-3.5-super-vl-120b-a12b"
+MODEL = "deepseek-ai/deepseek-v4.1-flash"
 BASE_URL = "https://integrate.api.nvidia.com/v1"
 MAX_FILE_BYTES = 20 * 1024 * 1024
 MAX_PAGES = 40

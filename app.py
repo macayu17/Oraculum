@@ -70,7 +70,7 @@ def get_client() -> OpenAI:
             status_code=503,
             detail="NVIDIA_API_KEY is not set. Add your NVIDIA API key to the environment and restart Oraculum.",
         )
-    return OpenAI(api_key=key, base_url=BASE_URL, timeout=180, max_retries=0)
+    return OpenAI(api_key=key, base_url=BASE_URL, timeout=180, max_retries=1)
 
 
 def answer(messages: list[dict], *, max_tokens: int = 6000, reasoning_effort: str = "none", response_format: dict | None = None) -> str:

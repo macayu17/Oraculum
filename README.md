@@ -32,6 +32,7 @@ Open <http://127.0.0.1:5173>. Vite proxies API requests to FastAPI. For a single
 - Papers and reference material may be PDFs, PNGs, or JPEGs. Text PDFs are read directly; scans and images are transcribed with the vision model.
 - Up to 12 papers and 8 reference files per analysis; each file is limited to 20 MB and each PDF to 40 pages.
 - Uploaded contents are sent to NVIDIA's hosted model for analysis and answers. Check extracted questions against the source where scan quality is poor.
+- Transient NVIDIA request failures are retried once; persistent failures are shown in the workspace so you can retry the analysis.
 - Study sessions and extracted text stay in server memory and are cleared when it restarts. The app has no accounts or persistent document storage.
 - Do not upload material you are not allowed to share with that service.
 
